@@ -1,0 +1,72 @@
+networks: # Define a custom network
+  internal_network:
+    driver: bridge
+
+services:
+  nginx-proxy:
+    image: nginx:latest
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./certs:/etc/nginx/certs
+    depends_on:
+      vllm-server:
+        condition: service_healthy # Wait for vLLM to be healthy
+      open-webui:
+        condition: service_started # Wait for Open WebUI to start
+    networks: # Connect Nginx to the internal network
+      - internal_network
+    restart: always
+
+  vllm-server:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    volumes:
+      - /scratch/hf_cache:/root/.cache/huggingface
+    # ports: # Ports are no longer exposed directly
+    #   - "8000:8000"
+    ipc: host
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    command: --model gaunernst/gemma-3-27b-it-int4-awq #--pipeline-parallel-size 2 --gpu-memory-utilization 0.99 --max-model-len 4096
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f --connect-timeout 4 --max-time 9 http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 1200s
+    networks: # Connect vllm-server to the internal network
+      - internal_network
+    restart: always
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    depends_on:
+      # For faster startup, don't wait for vllm-server to be fully healthy (service_healthy)
+      vllm-server:
+        condition: service_started
+    volumes:
+      - open-webui_data:/app/backend/data # Use a named volume for persistence
+    environment:
+      OPENAI_API_BASE_URL: http://vllm-server:8000/v1
+    # ports: # Ports are no longer exposed directly
+    #   - "3000:8080"
+    networks: # Connect open-webui to the internal network
+      - internal_network
+    restart: always
+
+volumes:
+  open-webui_data: # Define the named volume
